@@ -20,65 +20,58 @@ p{font-size:15px;color:#546E7A;margin:6px 0;}
 <button id="stopBtn" type="button">&#9632; Stop and send it back</button>
 <button id="closeBtn" type="button">Close this window</button>
 <script>
-/* Recorder bridge for the meeting console (hosted page, real origin, so the
+/* Recorder for the meeting console (hosted page, real origin, so the
    browser can grant the microphone — the console itself runs in a sandbox
-   frame that cannot). Opened by the console with a one-time nonce in the URL
-   fragment; records, posts the result back tagged with that nonce, and waits
-   for the console's acknowledgement. The fragment never reaches any server.
-   No other data leaves this page.
+   frame that cannot). Opened by the console with a one-time capture code in
+   the URL fragment (the fragment never reaches any server); records, then
+   hands the clip to the capture relay, which files it for the console to
+   pick up under that code. Nothing else leaves this page.
 
    Recording is RAW Web Audio capture encoded to WAV in this script — not
-   MediaRecorder, whose clip finalization crashed Safari's page process and
-   took the console (same process via the opener link) down with it.
+   MediaRecorder, whose clip finalization crashed Safari's page process.
    Recording starts on the Start press so the whole audio pipeline runs
    inside a real user gesture, which Safari requires to power an
-   AudioContext reliably.
-
-   This window NEVER closes itself and the console never closes it either —
-   the user closes it by hand via the Close button. Delivery: window.opener
-   may resolve to the outer Apps Script wrapper rather than the console's
-   inner frame, so the result is posted to the opener AND its nested frames
-   (two levels), and re-posted every 600ms until the console answers with an
-   ack for this nonce. The nonce keeps every message pairwise-private. */
+   AudioContext reliably. This window never closes itself; the user closes
+   it by hand via the Close button. */
 var NONCE = (window.location.hash || '').replace(/^#/, '');
 /* ?test=1 = standalone diagnostic: same capture pipeline, no console, no
-   popup. Records, then plays the clip back locally. Nothing is posted. */
+   delivery. Records, then plays the clip back locally. Nothing is posted. */
 var TESTMODE = /(\?|&)test=1/.test(window.location.search);
+/* The clip travels through the capture relay (the small helper script that
+   runs as the console's own account and files the clip in the capture inbox
+   folder); the console polls the inbox for the one-time code. This window is
+   opened fully isolated (noopener) so it never shares a browser process with
+   the console — a shared process is what crashed Safari — so there is no
+   window messaging at all. */
+var RELAY_URL = 'https://script.google.com/macros/s/AKfycby5C09Lo7olDPfsrolLbGCaxD39e0xcbs2RoNndoy2bYWoY7A4gTuJWk80dn2PABqk9/exec';
 var stream = null, left = 30, timer = null;
 var ctx = null, srcNode = null, proc = null, gainNode = null;
 var CAPTURING = false, CHUNKS = [], SAMPLE_RATE = 48000;
-var ACKED = false, SEND_TIMER = null;
 function say(t) { document.getElementById("statusTxt").textContent = t; }
 function showClose() { document.getElementById("closeBtn").style.display = "block"; }
-function targets() {
-  var list = [];
-  try { if (window.opener) list.push(window.opener); } catch (e) {}
-  try {
-    var o = window.opener;
-    for (var i = 0; i < o.length; i++) {
-      list.push(o.frames[i]);
-      try { for (var j = 0; j < o.frames[i].length; j++) list.push(o.frames[i].frames[j]); } catch (e2) {}
+function deliver(kind, extra, attempt) {
+  var body = { nonce: NONCE, kind: kind };
+  if (extra) { for (var k in extra) body[k] = extra[k]; }
+  fetch(RELAY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(body)
+  }).then(function(r) { return r.json(); }).then(function(j) {
+    if (j && j.ok) {
+      say("Delivered. The motion lands in the console within a few seconds. Close this window and review it there.");
+      showClose();
+    } else {
+      throw new Error((j && j.error) || "refused");
     }
-  } catch (e) {}
-  return list;
+  }).catch(function(err) {
+    if ((attempt || 0) < 2) {
+      setTimeout(function() { deliver(kind, extra, (attempt || 0) + 1); }, 1200);
+      return;
+    }
+    say("The clip could not be delivered (" + ((err && err.message) || err) + "). Close this window and type the motion in the console. Tidy works the same.");
+    showClose();
+  });
 }
-function post(kind, extra) {
-  var msg = { synCap: NONCE, kind: kind };
-  if (extra) { for (var k in extra) msg[k] = extra[k]; }
-  var list = targets();
-  for (var i = 0; i < list.length; i++) {
-    try { list[i].postMessage(msg, "*"); } catch (e) {}
-  }
-  return list.length;
-}
-window.addEventListener("message", function(ev) {
-  var d = ev && ev.data;
-  if (!d || d.synCap !== NONCE || d.kind !== "ack") return;
-  ACKED = true;
-  if (SEND_TIMER) clearInterval(SEND_TIMER);
-  say("Delivered to the console. Close this window and review the motion there.");
-  showClose();
-});
 function stopTracks() { try { if (stream) stream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {} }
 function teardownAudio() {
   try { if (proc) proc.disconnect(); } catch (e) {}
@@ -109,20 +102,8 @@ function finish(kind, extra) {
     }
     return;
   }
-  var n = post(kind, extra);
-  say("Sending to the console (" + n + " windows tried)… waiting for it to confirm.");
-  var tries = 0;
-  SEND_TIMER = setInterval(function() {
-    if (ACKED) { clearInterval(SEND_TIMER); return; }
-    tries += 1;
-    if (tries >= 12) {
-      clearInterval(SEND_TIMER);
-      say("The console did not confirm receipt. Go back to the console tab; if it reloaded, press Resume the meeting and capture again. Then close this window.");
-      showClose();
-      return;
-    }
-    post(kind, extra);
-  }, 600);
+  say("Sending the clip to the console…");
+  deliver(kind, extra, 0);
 }
 function fail(message) { finish("error", { message: message }); }
 /* --- WAV encode: merge chunks, downsample to 16 kHz mono, 16-bit PCM --- */
@@ -233,12 +214,9 @@ document.getElementById("stopBtn").onclick = stopRec;
 document.getElementById("closeBtn").onclick = function() { window.close(); };
 if (TESTMODE) {
   say("Test mode. Press Start recording, speak, then press Stop. The clip stays on this page.");
-} else if (!/^cap[a-z0-9]+$/.test(NONCE)) {
+} else if (!/^cap[a-z0-9]{8,60}$/.test(NONCE)) {
   document.getElementById("startBtn").style.display = "none";
   say("This page only works when the meeting console opens it. Close this window and press the capture button in the console.");
-} else if (!window.opener) {
-  document.getElementById("startBtn").style.display = "none";
-  say("The link to the console was lost (it may have reloaded). Close this window, press Resume the meeting in the console, and capture again.");
 } else {
   say("Press Start recording, speak the motion, then press Stop.");
 }
