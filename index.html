@@ -1,0 +1,81 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthia - Capture the motion</title><style>
+body{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;background:#F5F7FA;color:#1A2A3A;margin:0;padding:26px 22px;text-align:center;}
+h1{font-size:22px;color:#0D4F8B;margin:0 0 6px;}
+p{font-size:15px;color:#546E7A;margin:6px 0;}
+#count{font-size:52px;font-weight:700;color:#0D4F8B;margin:14px 0 2px;min-height:60px;}
+#status{font-size:16px;font-weight:700;color:#1A2A3A;min-height:44px;margin:10px 0;}
+#stopBtn{display:none;width:100%;min-height:64px;border:0;border-radius:8px;background:#9C2323;color:#fff;font-size:20px;font-weight:700;cursor:pointer;margin-top:10px;font-family:inherit;}
+#dot{display:none;width:12px;height:12px;border-radius:50%;background:#9C2323;margin-right:8px;vertical-align:baseline;animation:blink 1s infinite alternate;}
+@keyframes blink{to{opacity:.25;}}
+</style></head><body>
+<h1>Capture the motion</h1>
+<p>This window records for the meeting console. Allow the microphone if the browser asks.</p>
+<div id="count"></div>
+<div id="status"><span id="dot"></span><span id="statusTxt">Asking for the microphone&hellip;</span></div>
+<button id="stopBtn" type="button">&#9632; Stop and send it back</button>
+<script>
+/* Recorder bridge for the meeting console (hosted page, real origin, so the
+   browser can grant the microphone — the console itself runs in a sandbox
+   frame that cannot). Opened by the console with a one-time nonce in the URL
+   fragment; records, posts the audio back to the opener tagged with that
+   nonce, and closes. The fragment never reaches any server. No other data
+   leaves this page. */
+var NONCE = (window.location.hash || '').replace(/^#/, '');
+var stream = null, recorder = null, chunks = [], left = 30, timer = null;
+function say(t) { document.getElementById("statusTxt").textContent = t; }
+function post(kind, extra) {
+  var msg = { synCap: NONCE, kind: kind };
+  if (extra) { for (var k in extra) msg[k] = extra[k]; }
+  try { if (window.opener) window.opener.postMessage(msg, "*"); } catch (e) {}
+}
+function stopTracks() { try { if (stream) stream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {} }
+function finish(kind, extra) { clearInterval(timer); stopTracks(); post(kind, extra); setTimeout(function() { window.close(); }, 150); }
+function fail(message) { say(message); finish("error", { message: message }); }
+window.onunload = stopTracks;
+document.getElementById("stopBtn").onclick = function() { if (recorder && recorder.state === "recording") recorder.stop(); };
+if (!window.opener || !/^cap[a-z0-9]+$/.test(NONCE)) {
+  say("This page only works when the meeting console opens it. Close this window and press the capture button in the console.");
+} else if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) || typeof MediaRecorder === "undefined") {
+  fail("This browser cannot record audio. Type the motion in the console instead.");
+} else {
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(function(st) {
+    stream = st;
+    var mt = "";
+    var prefs = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+    for (var i = 0; i < prefs.length; i++) { if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(prefs[i])) { mt = prefs[i]; break; } }
+    try { recorder = mt ? new MediaRecorder(stream, { mimeType: mt, audioBitsPerSecond: 32000 }) : new MediaRecorder(stream); }
+    catch (e) { fail("Recording could not start in this browser. Type the motion in the console instead."); return; }
+    recorder.ondataavailable = function(e) { if (e.data && e.data.size) chunks.push(e.data); };
+    recorder.onerror = function() { fail("The recording hit a problem partway through. Nothing was written. Try again, or type the motion."); };
+    recorder.onstop = function() {
+      stopTracks();
+      var type = (recorder.mimeType || "audio/webm").split(";")[0];
+      var blob = new Blob(chunks, { type: type });
+      if (blob.size < 2000) { finish("short"); return; }
+      say("Sending the clip back to the console…");
+      var reader = new FileReader();
+      reader.onloadend = function() {
+        var b64 = String(reader.result || "").split(",")[1] || "";
+        if (!b64) { finish("error", { message: "The recording could not be encoded." }); return; }
+        finish("audio", { b64: b64, mime: type });
+      };
+      reader.readAsDataURL(blob);
+    };
+    document.getElementById("stopBtn").style.display = "block";
+    document.getElementById("dot").style.display = "inline-block";
+    say("Recording. Speak the motion clearly, then press Stop.");
+    document.getElementById("count").textContent = left + "s";
+    timer = setInterval(function() {
+      left -= 1;
+      document.getElementById("count").textContent = (left > 0 ? left : 0) + "s";
+      if (left <= 0 && recorder.state === "recording") recorder.stop();
+    }, 1000);
+    recorder.start();
+  }, function() {
+    say("The microphone is blocked.");
+    finish("denied");
+  });
+}
+</script></body></html>
