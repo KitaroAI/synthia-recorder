@@ -7,6 +7,7 @@ p{font-size:15px;color:#546E7A;margin:6px 0;}
 #count{font-size:52px;font-weight:700;color:#0D4F8B;margin:14px 0 2px;min-height:60px;}
 #status{font-size:16px;font-weight:700;color:#1A2A3A;min-height:44px;margin:10px 0;}
 #stopBtn{display:none;width:100%;min-height:64px;border:0;border-radius:8px;background:#9C2323;color:#fff;font-size:20px;font-weight:700;cursor:pointer;margin-top:10px;font-family:inherit;}
+#closeBtn{display:none;width:100%;min-height:52px;border:0;border-radius:8px;background:#0D4F8B;color:#fff;font-size:18px;font-weight:700;cursor:pointer;margin-top:10px;font-family:inherit;}
 #dot{display:none;width:12px;height:12px;border-radius:50%;background:#9C2323;margin-right:8px;vertical-align:baseline;animation:blink 1s infinite alternate;}
 @keyframes blink{to{opacity:.25;}}
 </style></head><body>
@@ -15,26 +16,79 @@ p{font-size:15px;color:#546E7A;margin:6px 0;}
 <div id="count"></div>
 <div id="status"><span id="dot"></span><span id="statusTxt">Asking for the microphone&hellip;</span></div>
 <button id="stopBtn" type="button">&#9632; Stop and send it back</button>
+<button id="closeBtn" type="button">Close this window</button>
 <script>
 /* Recorder bridge for the meeting console (hosted page, real origin, so the
    browser can grant the microphone — the console itself runs in a sandbox
    frame that cannot). Opened by the console with a one-time nonce in the URL
-   fragment; records, posts the audio back to the opener tagged with that
-   nonce, and closes. The fragment never reaches any server. No other data
-   leaves this page. */
+   fragment; records, posts the result back tagged with that nonce, and waits
+   for the console's acknowledgement. The fragment never reaches any server.
+   No other data leaves this page.
+
+   This window NEVER closes itself and the console never closes it either —
+   Safari can reload the console's sandbox frame around window lifecycle
+   events, so the user closes it by hand via the Close button.
+
+   Delivery: window.opener may resolve to the outer Apps Script wrapper
+   rather than the console's inner frame, so the result is posted to the
+   opener AND its nested frames (two levels), and re-posted every 600ms until
+   the console answers with an ack for this nonce. The nonce keeps every
+   message pairwise-private; no other window knows it. */
 var NONCE = (window.location.hash || '').replace(/^#/, '');
 var stream = null, recorder = null, chunks = [], left = 30, timer = null;
+var ACKED = false, SEND_TIMER = null;
 function say(t) { document.getElementById("statusTxt").textContent = t; }
+function showClose() { document.getElementById("closeBtn").style.display = "block"; }
+function targets() {
+  var list = [];
+  try { if (window.opener) list.push(window.opener); } catch (e) {}
+  try {
+    var o = window.opener;
+    for (var i = 0; i < o.length; i++) {
+      list.push(o.frames[i]);
+      try { for (var j = 0; j < o.frames[i].length; j++) list.push(o.frames[i].frames[j]); } catch (e2) {}
+    }
+  } catch (e) {}
+  return list;
+}
 function post(kind, extra) {
   var msg = { synCap: NONCE, kind: kind };
   if (extra) { for (var k in extra) msg[k] = extra[k]; }
-  try { if (window.opener) window.opener.postMessage(msg, "*"); } catch (e) {}
+  var list = targets();
+  for (var i = 0; i < list.length; i++) {
+    try { list[i].postMessage(msg, "*"); } catch (e) {}
+  }
+  return list.length;
 }
+window.addEventListener("message", function(ev) {
+  var d = ev && ev.data;
+  if (!d || d.synCap !== NONCE || d.kind !== "ack") return;
+  ACKED = true;
+  if (SEND_TIMER) clearInterval(SEND_TIMER);
+  say("Delivered to the console. Close this window and review the motion there.");
+  showClose();
+});
 function stopTracks() { try { if (stream) stream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {} }
-function finish(kind, extra) { clearInterval(timer); stopTracks(); post(kind, extra); setTimeout(function() { window.close(); }, 150); }
-function fail(message) { say(message); finish("error", { message: message }); }
-window.onunload = stopTracks;
+function finish(kind, extra) {
+  clearInterval(timer); stopTracks();
+  var n = post(kind, extra);
+  say("Sending to the console (" + n + " windows tried)… waiting for it to confirm.");
+  var tries = 0;
+  SEND_TIMER = setInterval(function() {
+    if (ACKED) { clearInterval(SEND_TIMER); return; }
+    tries += 1;
+    if (tries >= 12) {
+      clearInterval(SEND_TIMER);
+      say("The console did not confirm receipt. Go back to the console tab; if it reloaded, press Resume the meeting and capture again. Then close this window.");
+      showClose();
+      return;
+    }
+    post(kind, extra);
+  }, 600);
+}
+function fail(message) { finish("error", { message: message }); }
 document.getElementById("stopBtn").onclick = function() { if (recorder && recorder.state === "recording") recorder.stop(); };
+document.getElementById("closeBtn").onclick = function() { window.close(); };
 if (!window.opener || !/^cap[a-z0-9]+$/.test(NONCE)) {
   say("This page only works when the meeting console opens it. Close this window and press the capture button in the console.");
 } else if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) || typeof MediaRecorder === "undefined") {
@@ -51,10 +105,10 @@ if (!window.opener || !/^cap[a-z0-9]+$/.test(NONCE)) {
     recorder.onerror = function() { fail("The recording hit a problem partway through. Nothing was written. Try again, or type the motion."); };
     recorder.onstop = function() {
       stopTracks();
+      document.getElementById("stopBtn").style.display = "none";
       var type = (recorder.mimeType || "audio/webm").split(";")[0];
       var blob = new Blob(chunks, { type: type });
       if (blob.size < 2000) { finish("short"); return; }
-      say("Sending the clip back to the console…");
       var reader = new FileReader();
       reader.onloadend = function() {
         var b64 = String(reader.result || "").split(",")[1] || "";
