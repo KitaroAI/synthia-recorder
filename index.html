@@ -41,6 +41,9 @@ p{font-size:15px;color:#546E7A;margin:6px 0;}
    (two levels), and re-posted every 600ms until the console answers with an
    ack for this nonce. The nonce keeps every message pairwise-private. */
 var NONCE = (window.location.hash || '').replace(/^#/, '');
+/* ?test=1 = standalone diagnostic: same capture pipeline, no console, no
+   popup. Records, then plays the clip back locally. Nothing is posted. */
+var TESTMODE = /(\?|&)test=1/.test(window.location.search);
 var stream = null, left = 30, timer = null;
 var ctx = null, srcNode = null, proc = null, gainNode = null;
 var CAPTURING = false, CHUNKS = [], SAMPLE_RATE = 48000;
@@ -86,6 +89,26 @@ function teardownAudio() {
 }
 function finish(kind, extra) {
   clearInterval(timer); teardownAudio();
+  if (TESTMODE) {
+    if (kind === "audio") {
+      var bytes = Uint8Array.from(atob(extra.b64), function(c) { return c.charCodeAt(0); });
+      var secs = Math.round((bytes.length - 44) / 32000 * 10) / 10;
+      var kb = Math.round(bytes.length / 1024);
+      say("Test clip captured: " + secs + "s, " + kb + " KB WAV. Play it back below.");
+      var au = document.createElement("audio");
+      au.controls = true;
+      au.style.marginTop = "14px";
+      au.src = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      document.body.appendChild(au);
+    } else if (kind === "short") {
+      say("Test result: the clip was too short to hear anything.");
+    } else if (kind === "denied") {
+      say("Test result: the microphone is blocked.");
+    } else {
+      say("Test result: " + ((extra && extra.message) || "the recording could not be finished."));
+    }
+    return;
+  }
   var n = post(kind, extra);
   say("Sending to the console (" + n + " windows tried)… waiting for it to confirm.");
   var tries = 0;
@@ -208,7 +231,9 @@ function startRec() {
 document.getElementById("startBtn").onclick = startRec;
 document.getElementById("stopBtn").onclick = stopRec;
 document.getElementById("closeBtn").onclick = function() { window.close(); };
-if (!/^cap[a-z0-9]+$/.test(NONCE)) {
+if (TESTMODE) {
+  say("Test mode. Press Start recording, speak, then press Stop. The clip stays on this page.");
+} else if (!/^cap[a-z0-9]+$/.test(NONCE)) {
   document.getElementById("startBtn").style.display = "none";
   say("This page only works when the meeting console opens it. Close this window and press the capture button in the console.");
 } else if (!window.opener) {
